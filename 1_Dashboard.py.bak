@@ -1,0 +1,242 @@
+import streamlit as st
+import pandas as pd
+import numpy as np
+from datetime import datetime, timedelta
+import plotly.express as px
+import plotly.graph_objects as go
+
+# Import custom modules
+import auth
+import utils
+import visualization
+from data_loader import load_strawberry_data, filter_data, get_optimal_ranges
+
+# Page configuration
+st.set_page_config(
+    page_title="Dashboard | Strawberry AquaMind",
+    page_icon="🍓",
+    layout="wide",
+    initial_sidebar_state="expanded"
+)
+
+# Check authentication
+if 'auth_status' not in st.session_state or not st.session_state['auth_status']:
+    st.warning("Please login to access this page.")
+    st.stop()
+
+# Load data if not already in session state
+if 'strawberry_data' not in st.session_state or st.session_state['strawberry_data'] is None:
+    st.session_state['strawberry_data'] = load_strawberry_data()
+    
+    if st.session_state['strawberry_data'] is not None:
+        # Initialize date range if needed
+        if 'date_range' not in st.session_state:
+            min_date = st.session_state['strawberry_dat']a['Date'].min()
+            max_date = st.session_state['strawberry_dat']a['Date'].max()
+            st.session_state['date_range'] = (min_date, max_date)
+
+# Sidebar filters
+with st.sidebar:
+    st.title("Dashboard Filters")
+    
+    # Variety selector
+    if st.session_state['strawberry_data'] is not None:
+        varieties = ["All"] + sorted(st.session_state['strawberry_dat']a["Variety"].unique().tolist())
+        selected_variety = st.selectbox("Strawberry Variety", varieties, index=varieties.index(st.session_state['selected_variety']) if st.session_state['selected_variety'] in varieties else 0)
+        st.session_state['selected_variety'] = selected_variety
+        
+        # Time period selector
+        date_periods = utils.get_date_periods()
+        selected_period = st.selectbox("Time Period", list(date_periods.keys()))
+        
+        if selected_period != "Custom":
+            st.session_state['date_range'] = date_periods[selected_period]
+        else:
+            # Custom date range
+            min_date = st.session_state['strawberry_dat']a['Date'].min()
+            max_date = st.session_state['strawberry_dat']a['Date'].max()
+            
+            date_range = st.date_input(
+                "Custom Date Range",
+                value=st.session_state['date_range'] if st.session_state['date_rang']e[0] is not None else (min_date, max_date),
+                min_value=min_date,
+                max_value=max_date
+            )
+            
+            if len(date_range) == 2:
+                st.session_state['date_range'] = date_range
+                
+        # Time of day filter
+        time_options = ["Both", "Morning", "Evening"]
+        selected_time = st.selectbox("Time of Day", time_options, index=0)
+
+# Main dashboard content
+st.title("Strawberry Aquaponics Dashboard")
+
+# Display current filters
+variety_text = st.session_state['selected_variety']
+date_text = utils.format_date_range(st.session_state['date_rang']e[0], st.session_state['date_rang']e[1])
+st.markdown(f"### Viewing: {variety_text} | {date_text}")
+
+# Filter data based on user selections
+filtered_data = st.session_state['strawberry_data']
+if st.session_state['selected_variety'] != "All":
+    filtered_data = filtered_data[filtered_data["Variety"] == st.session_state['selected_variety']]
+
+if st.session_state['date_rang']e[0] is not None and st.session_state['date_rang']e[1] is not None:
+    filtered_data = filtered_data[(filtered_data["Date"] >= st.session_state['date_rang']e[0]) & 
+                                 (filtered_data["Date"] <= st.session_state['date_rang']e[1])]
+    
+if selected_time != "Both":
+    filtered_data = filtered_data[filtered_data["Time"] == selected_time]
+
+# Check if we have data after filtering
+if filtered_data.empty:
+    st.warning("No data available for the selected filters. Please adjust your selections.")
+else:
+    # Overview metrics
+    st.subheader("Current System Status")
+    
+    # Get the latest data for the metrics
+    latest_date = filtered_data["Date"].max()
+    latest_data = filtered_data[filtered_data["Date"] == latest_date]
+    
+    if selected_time == "Both" and "Morning" in latest_data["Time"].values and "Evening" in latest_data["Time"].values:
+        # If both morning and evening are in the latest data, use the evening data (most recent)
+        latest_data = latest_data[latest_data["Time"] == "Evening"]
+    
+    if not latest_data.empty:
+        # Calculate average values for the latest data
+        avg_ph = latest_data["pH"].mean()
+        avg_ec = latest_data["EC_mS_cm"].mean()
+        avg_humidity = latest_data["Humidity_pct"].mean()
+        avg_water_temp = latest_data["Water_Temp_C"].mean()
+        avg_air_temp = latest_data["Air_Temp_C"].mean()
+        
+        # Determine overall system status
+        status_message, status_color = utils.evaluate_system_status(
+            avg_ph, avg_ec, avg_humidity, avg_water_temp
+        )
+        
+        # Display system status
+        st.markdown(
+            f"""
+            <div style="background-color:{status_color};padding:20px;border-radius:10px;margin-bottom:20px;">
+                <h2 style="color:white;margin:0;text-align:center;">System Status: {status_message}</h2>
+                <p style="color:white;text-align:center;margin:5px 0 0 0;">Last updated: {latest_date.strftime('%Y-%m-%d')} ({latest_data['Time'].iloc[0]})</p>
+            </div>
+            """, 
+            unsafe_allow_html=True
+        )
+        
+        # Display metrics
+        col1, col2, col3, col4, col5 = st.columns(5)
+        
+        optimal_ranges = get_optimal_ranges()
+        
+        with col1:
+            ph_status = "normal" if optimal_ranges["pH"][0] <= avg_ph <= optimal_ranges["pH"][1] else "off"
+            delta_color = "normal" if ph_status == "normal" else "inverse"
+            ph_delta = round(avg_ph - sum(optimal_ranges["pH"])/2, 2)
+            st.metric("pH", f"{avg_ph:.2f}", delta=f"{ph_delta:+.2f}", delta_color=delta_color)
+            
+        with col2:
+            ec_status = "normal" if optimal_ranges["EC_mS_cm"][0] <= avg_ec <= optimal_ranges["EC_mS_cm"][1] else "off"
+            delta_color = "normal" if ec_status == "normal" else "inverse"
+            ec_delta = round(avg_ec - sum(optimal_ranges["EC_mS_cm"])/2, 2)
+            st.metric("EC (mS/cm)", f"{avg_ec:.2f}", delta=f"{ec_delta:+.2f}", delta_color=delta_color)
+            
+        with col3:
+            humidity_status = "normal" if optimal_ranges["Humidity_pct"][0] <= avg_humidity <= optimal_ranges["Humidity_pct"][1] else "off"
+            delta_color = "normal" if humidity_status == "normal" else "inverse"
+            humidity_delta = round(avg_humidity - sum(optimal_ranges["Humidity_pct"])/2, 1)
+            st.metric("Humidity (%)", f"{avg_humidity:.1f}", delta=f"{humidity_delta:+.1f}", delta_color=delta_color)
+            
+        with col4:
+            water_temp_status = "normal" if optimal_ranges["Water_Temp_C"][0] <= avg_water_temp <= optimal_ranges["Water_Temp_C"][1] else "off"
+            delta_color = "normal" if water_temp_status == "normal" else "inverse"
+            water_temp_delta = round(avg_water_temp - sum(optimal_ranges["Water_Temp_C"])/2, 1)
+            st.metric("Water Temp (°C)", f"{avg_water_temp:.1f}", delta=f"{water_temp_delta:+.1f}", delta_color=delta_color)
+            
+        with col5:
+            air_status = "normal" if 20 <= avg_air_temp <= 25 else "off"
+            delta_color = "normal" if air_status == "normal" else "inverse"
+            air_temp_delta = round(avg_air_temp - 22.5, 1)  # Assuming 20-25 is optimal
+            st.metric("Air Temp (°C)", f"{avg_air_temp:.1f}", delta=f"{air_temp_delta:+.1f}", delta_color=delta_color)
+    
+    # Trend charts
+    st.subheader("Parameter Trends")
+    
+    # Parameter selector for trend charts
+    trend_params = st.multiselect(
+        "Select Parameters to Display",
+        ["pH", "EC_mS_cm", "Humidity_pct", "Water_Temp_C", "Air_Temp_C"],
+        default=["pH", "EC_mS_cm"]
+    )
+    
+    if trend_params:
+        # Create tabs for different trend visualizations
+        trend_tab1, trend_tab2 = st.tabs(["Time Series", "Distribution"])
+        
+        with trend_tab1:
+            for param in trend_params:
+                fig = visualization.plot_parameter_trends(filtered_data, param, st.session_state['selected_variety'])
+                if fig:
+                    st.plotly_chart(fig, use_container_width=True)
+                    
+        with trend_tab2:
+            for param in trend_params:
+                fig = visualization.plot_parameter_distribution(filtered_data, param, st.session_state['selected_variety'])
+                if fig:
+                    st.plotly_chart(fig, use_container_width=True)
+    
+    # Variety comparison (only show if All varieties are selected)
+    if st.session_state['selected_variety'] == "All":
+        st.subheader("Variety Comparison")
+        
+        # Parameter selector for variety comparison
+        variety_param = st.selectbox(
+            "Select Parameter for Comparison",
+            ["pH", "EC_mS_cm", "Humidity_pct", "Water_Temp_C"],
+            index=0
+        )
+        
+        fig = visualization.plot_variety_comparison(filtered_data, variety_param)
+        if fig:
+            st.plotly_chart(fig, use_container_width=True)
+            
+    # Correlation analysis
+    st.subheader("Parameter Correlations")
+    
+    correlation_fig = visualization.plot_correlation_heatmap(filtered_data, st.session_state['selected_variety'])
+    if correlation_fig:
+        st.plotly_chart(correlation_fig, use_container_width=True)
+        
+        # Add explanation about correlations
+        with st.expander("About Correlations"):
+            st.markdown("""
+            The correlation heatmap shows the relationship between different parameters:
+            - Values close to 1 indicate a strong positive correlation (when one parameter increases, the other tends to increase as well)
+            - Values close to -1 indicate a strong negative correlation (when one parameter increases, the other tends to decrease)
+            - Values close to 0 indicate little or no correlation
+            
+            This can help you understand how different parameters influence each other in your system.
+            """)
+            
+    # Morning vs. Evening comparison
+    if selected_time == "Both":
+        st.subheader("Morning vs. Evening Comparison")
+        
+        # Parameter selector for morning vs. evening comparison
+        time_comparison_param = st.selectbox(
+            "Select Parameter for Time Comparison",
+            ["pH", "EC_mS_cm", "Humidity_pct", "Water_Temp_C"],
+            index=0,
+            key="time_comp_param"
+        )
+        
+        time_comparison_fig = visualization.plot_time_of_day_comparison(
+            filtered_data, time_comparison_param, st.session_state['selected_variety']
+        )
+        if time_comparison_fig:
+            st.plotly_chart(time_comparison_fig, use_container_width=True)
